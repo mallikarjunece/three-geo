@@ -1,15 +1,8 @@
-const __version = "1.3.0dev-a";
-
 // if THREE is global (via script-tag loading), use that THREE to prevent
 // conflicts with ES6 version. (Line objects become broken, otherwise...)
 import * as THREE_ES6 from 'three';
 // console.log('window.THREE:', window.THREE);
 const THREE = window.THREE ? window.THREE : THREE_ES6;
-
-import 'regenerator-runtime/runtime.js';
-
-import Utils from './Utils.js';
-import Laser from 'three-laser-pointer/src';
 
 // import * as turf from '@turf/turf'; // need being more selective - http://turfjs.org/getting-started/
 // import { intersect } from '@turf/turf'; // TEST of tree-shaking, not working... FIXME
@@ -17,6 +10,7 @@ import Laser from 'three-laser-pointer/src';
 //========
 import * as turfHelpers from '@turf/helpers';
 // console.log('turfHelpers:', turfHelpers);
+import turfTransformTranslate from '@turf/transform-translate';
 
 //======== FIXME try v7 in future??
 // v5 approach introduces jsts.min.js causing bloat (to 482KB)
@@ -62,6 +56,7 @@ import xhr from 'xhr';
 import Pbf from 'pbf';
 import { VectorTile } from '@mapbox/vector-tile';
 import uniq from 'uniq';
+import tilebelt from "@mapbox/tilebelt";
 
 // no longer used; see colorRangeNonD3()
 // import * as d3 from 'd3'; // be more selective - https://github.com/d3/d3
@@ -130,17 +125,14 @@ const constSeamRows = computeSeamRows(1);
 
 class ThreeGeo {
     constructor(opts={}) {
-        this.version = __version;
-        Utils._consoleLog(`ThreeGeo ${__version} with THREE r${THREE.REVISION}`);
-
-        const defaults = {
+        let defaults = {
             unitsSide: 1.0,
             tokenMapbox: "",
             apiVector: 'mapbox-terrain-vector',
             apiRgb: 'mapbox-terrain-rgb',
             apiSatellite: 'mapbox-satellite',
         };
-        const actual = Object.assign({}, defaults, opts);
+        let actual = Object.assign({}, defaults, opts);
         this.constUnitsSide = actual.unitsSide;
         this.tokenMapbox = actual.tokenMapbox;
         this.apiVector = actual.apiVector;
@@ -149,18 +141,19 @@ class ThreeGeo {
     }
 
     static getEleList(geojson) {
-        return uniq(geojson.features.map(feat => feat.properties.ele))
-            .sort((a, b) => a - b);
+        let mapper = (feature) => { return feature.properties.ele; };
+        return uniq(geojson.features.map(mapper))
+            .sort((a, b) => { return a - b; });
     }
     static addBottomEle(geojson, bottomTiles, eleList) {
         bottomTiles.forEach((bottom) => {
-            const tileBottomEle = bottom.properties.ele;
-            for (let _ele = eleList[0]; _ele < tileBottomEle; _ele += 10) {
+            let tileBottomEle = bottom.properties.ele;
+            for (let k = eleList[0]; k < tileBottomEle; k += 10) {
                 // console.log('k:', k);
                 geojson.features.push({
                     type: "Feature",
                     geometry: bottom.geometry,
-                    properties: {ele: _ele},
+                    properties: {ele: k},
                 });
             }
         });
@@ -223,244 +216,95 @@ class ThreeGeo {
 
         return contours;
     }
-
-    static _getUnitsPerMeter(unitsSide, radius) {
+    // TODO doc
+    static getUnitsPerMeter(unitsSide, radius) {
         return unitsSide / (radius * Math.pow(2, 0.5) * 1000);
     }
-    _projectCoord(coord, nw, se, unitsSide=this.constUnitsSide) {
-        return ThreeGeo._projectCoordStatic(coord, nw, se, unitsSide);
-    }
-    static _projectCoordStatic(coord, nw, se, unitsSide) {
-        // lng, lat -> px, py
+    projectCoord(coord, nw, se) { // lng, lat -> px, py
         return [
-            unitsSide * (-0.5 + (coord[0]-nw[0]) / (se[0]-nw[0])),
-            unitsSide * (-0.5 - (coord[1]-se[1]) / (se[1]-nw[1]))
+            this.constUnitsSide * (-0.5 + (coord[0]-nw[0]) / (se[0]-nw[0])),
+            this.constUnitsSide * (-0.5 - (coord[1]-se[1]) / (se[1]-nw[1]))
         ];
     }
-
-    // TODO to be deprecated ........
-    static _resolveTri(x, y, meshes, scale, shiftZ) {
-        const isect = (new Laser()).raycast(
-            new THREE.Vector3(x, y, 12000), // ray origin
-            new THREE.Vector3(0, 0, -1), // ray direction
-            meshes);
-        // console.log('isect:', isect);
-        if (! isect) return null;
-
-        // console.log('isect:', isect);
-        // console.log('isect.point.z:', isect.point.z);
-        // console.log('isect.faceIndex:', isect.faceIndex);
-        // https://stackoverflow.com/questions/41540313/three-buffergeometry-accessing-face-indices-and-face-normals
-        const faceIndex = isect.faceIndex;
-        const indexArr = isect.object.geometry.index.array;
-        const attrPos = isect.object.geometry.attributes.position;
-        const tri = [0, 1, 2].map(i => (new THREE.Vector3())
-            .fromBufferAttribute(attrPos, indexArr[3 * faceIndex + i])
-            .multiplyScalar(scale)
-            // z's of tri is relative to the isect point
-            .add(new THREE.Vector3(0, 0, shiftZ ? shiftZ : -isect.point.z)));
-        // console.log('isect tri (z-shifted):', tri);
-        return { // return new objects to remain pure
-            faceIndex: isect.faceIndex,
-            isectPoint: isect.point.clone(),
-            tri: tri,
-            normal: isect.face.normal.clone(),
-        };
+    // TODO doc
+    static translate(turfObj, dx, dy, dz, unitsPerMeter, mutate=true) {
+        const vec = new THREE.Vector2(dx, dy).divideScalar(unitsPerMeter);
+        const theta = 90.0 - vec.angle() * 180.0 / Math.PI;
+        return turfTransformTranslate(turfObj, vec.length(), theta, {
+                units: 'meters',
+                zTranslation: dz / unitsPerMeter,
+                mutate: mutate, // "significant performance increase if true" per doc
+            });
     }
-
-    static _findIsect(x, y, lat, lng, meshes) {
-
-        //---- find the corresponding mesh based on bbox info
-
-        console.log('meshes for ele:', meshes);
-        const candidates = [];
-        for (let mesh of meshes) {
-            const tile = mesh.userData.threeGeo.tile;
-            // console.log('tile:', tile);
-            const [w, s, e, n] = Utils.tileToBbox(tile);
-            const isInBbox = s < lat && lat < n && w < lng && lng < e;
-            // console.log('isInBbox:', isInBbox);
-            if (isInBbox) candidates.push(mesh);
-        }
-        if (candidates.length === 0) return null;
-
-        const target = candidates[0];
-        console.log('target:', target);
-        // target.material.wireframe = true; // debug
-
-        //---- x, y, target -> rayOriginWorld, rayDirectionWorld
-
-        console.log('x, y:', x, y); // terrain coords
-
-        let rayOriginWorld, rayDirectionWorld;
-        { // ray origin: terrain coords -> world coords
-            const vecTerrain = new THREE.Vector3(x, y, 4); // TODO z should be high enough
-            const vecWorld = vecTerrain.clone().applyMatrix4(target.matrixWorld);
-            console.log('ray origin:', vecTerrain, '->', vecWorld);
-            rayOriginWorld = vecWorld;
-
-            window._scene.add( // debug viz: ray origin correspondence
-                Utils.createLine([vecTerrain, vecWorld], {color: 0x00ff00}));
-        }
-        { // ray direction: terrain coords -> world coords
-            const vecTerrain = new THREE.Vector3(0, 0, -1);
-            const vecWorld = vecTerrain.clone().applyMatrix4(target.matrixWorld);
-            console.log('ray direction:', vecTerrain, '->', vecWorld);
-            rayDirectionWorld = vecWorld;
-        }
-
-        //---- raycasting to the `target` mesh
-
-        const isect = (new Laser()).raycast(
-            rayOriginWorld, rayDirectionWorld, [target]);
-        console.log('isect:', isect);
-
-        if (1 && isect) {
-            window._scene.add( // debug viz: raycasting in world coords
-                Utils.createLine([rayOriginWorld, isect.point], {color: 0x00ffff}));
-        }
-
-        return isect ? { isect, target } : null;
-    }
-    static _isectToPoints(isect, target) {
-        const pointWorld = isect.point;
-        const matrixWorldInv = new THREE.Matrix4().getInverse(target.matrixWorld);
-        const pointTerrain = pointWorld.clone().applyMatrix4(matrixWorldInv);
-        return { pointWorld, pointTerrain };
-    }
-    static _isectToTriInfo(isect, target) {
-        const targetTerrain = target.clone();
-        targetTerrain.rotation.x = 0;//!!!!
-        window._scene.add(targetTerrain);
-
-        // check triTerrain and triWorld
-        const faceIndex = isect.faceIndex;
-        const indexArr = isect.object.geometry.index.array;
-        const attrPos = isect.object.geometry.attributes.position;
-        const triTerrain = [0, 1, 2].map(i => (new THREE.Vector3())
-            .fromBufferAttribute(attrPos, indexArr[3 * faceIndex + i]));
-        console.log('isect -> triTerrain:', triTerrain);
-        window._scene.add(Utils.createLine(triTerrain)); //!!!!!!!!!
-
-        const triWorld = triTerrain.map(vec => vec.applyMatrix4(target.matrixWorld));
-        console.log('triTerrain -> triWorld:', triWorld);
-        window._scene.add(Utils.createLine(triWorld, {color: 0x00ffff})); //!!!!!!!!!
-
-        const _triInfo = null; // TODO !!!!
-        return _triInfo;
-    }
-    static _resolveTri2(x, y, meshes) {
-        // TODO handle when `target` is scaled !!!! ********
-
-        // TODO [x, y] -> [lat, lng]
-        const ret = this._findIsect(x, y, lat, lng, meshes);
-        if (!ret) return null; // triInfo
-
-        const { isect, target } = ret;
-
-        const _triInfo = this._isectToTriInfo(isect, target);
-
-        // check normalTerrain and normalWorld
-        const normalTerrain = isect.face.normal.clone();
-        const normalWorld = normalTerrain.clone().applyMatrix4(target.matrixWorld);
-        if (1) { // FIXME: not showing !!!!
-            const { pointWorld, pointTerrain } = this._isectToPoints(isect, target);
-            window._scene.add(Utils.createLine([pointTerrain, pointTerrain.clone().add(normalTerrain)])); //!!!!!!!!!
-            window._scene.add(Utils.createLine([pointWorld, pointWorld.clone().add(normalWorld)], {color: 0x00ffff})); //!!!!!!!!!
-        }
-
-        const triInfo = { _triInfo, normalTerrain, normalWorld }; // TODO !!!!!
-        return triInfo;
-    }
-    static _resolveElevation(x, y, lat, lng, meshes) {
-        // TODO handle when `target` is scaled !!!! ********
-
-        const ret = this._findIsect(x, y, lat, lng, meshes);
-        if (!ret) return undefined; // (elevation)
-
-        const { isect, target } = ret;
-
-/*
-                    rayOriginWorld, rayDirectionWorld, target
-                ->  [isect..............................................]
-                ->  faceIndex,  pointWorld,    triTerrain,  normalTerrain
-                                v              v            v
-for elevation   <-              pointTerrain,  v            v
-for triInfo     <-                             triWorld,    normalWorld
-*/
-
-        const { pointWorld, pointTerrain } = this._isectToPoints(isect, target);
-        console.log('pointTerrain:', pointTerrain);
-
-        if (1) {
-            window._scene.add( // debug viz: raycasting in terrain coords
-                Utils.createLine([new THREE.Vector3(x, y, 4), pointTerrain]));
-        }
-
-        this._isectToTriInfo(isect, target); // test !!!!!!!!
-
-        return pointTerrain.z; // (elevation)
-    }
-
-    // **** WIP **** not sure going this direction........
-    // !!!! https://github.com/mapbox/sphericalmercator
-    // TODO 3) find the pixel for `ll` on `meshCorresp`
-    // TODO 4) interpolate the elevation based on nearby pixels
-    //   using sphericalmercator.px(ll, zoom)
-    //   cf. processRgbTile() dealing with `constTilePixels.ll()`
-    // ...
-
-    static _proj(ll, meshes, wsen, unitsSide) {
-        const [lat, lng] = ll;
-        const [w, s, e, n] = wsen;
-
-        // [x, y, z]: terrain coordinates
-        const [x, y] = this._projectCoordStatic(
-            [lng, lat], [w, n], [e, s], unitsSide);
-
-        // resolve z (elevation) in case the optional `meshes` is provided
-        const z = meshes ?
-            this._resolveElevation(x, y, lat, lng, meshes) : // maybe `undefined`
-            undefined;
-
-        return z !== undefined ? [x, y, z] : [x, y];
-    }
-    static _projInv(x, y, origin, unitsPerMeter) {
-        const _swap = ll => [ll[1], ll[0]];
-        return _swap(Utils.translateTurfObject(
+    // TODO doc
+    static projInv(x, y, origin, unitsPerMeter) {
+        const _swap = ll => [ll[1], ll[0]]; // leaflet: ltlg, turf: lglt
+        return _swap(this.translate(
             turfHelpers.point(_swap(origin)),
-            x, y, 0, unitsPerMeter).geometry.coordinates); // latlng
+            x, y, 0, unitsPerMeter).geometry.coordinates);
     }
-    // ll-notation
-    //   latlng: three-geo, leaflet
-    //   lnglat: turf
-    getProjection(origin, radius, unitsSide=this.constUnitsSide) {
-        const wsen = ThreeGeo.originRadiusToBbox(origin, radius);
-        // console.log('origin:', origin);
-        // console.log('wsen:', wsen);
-        const _unitsPerMeter = ThreeGeo._getUnitsPerMeter(unitsSide, radius);
+    // TODO doc
+    // TODO add inverse projection; use ThreeGeo.translate()
+    getProjection(origin, radius) {
+        const [w, s, e, n] = ThreeGeo.originRadiusToBbox(origin, radius);
+        const _unitsPerMeter = ThreeGeo.getUnitsPerMeter(this.constUnitsSide, radius);
         return {
-            proj: (latlng, meshes=undefined) => // `meshes`: rgbDem
-                ThreeGeo._proj(latlng, meshes, wsen, unitsSide),
-            projInv: (x, y) =>
-                ThreeGeo._projInv(x, y, origin, _unitsPerMeter), // latlng
-            bbox: wsen,
+            proj: ll => this.projectCoord(ll, [w, n], [e, s]),
+            projInv: (x, y) => ThreeGeo.projInv(x, y, origin, _unitsPerMeter),
+            bbox: [w, s, e, n],
             unitsPerMeter: _unitsPerMeter,
         };
     }
+    // TODO doc
+    static bboxToWireframe(wsen, proj, opts={}) {
+        const defaults = {
+            offsetZ: 0.0,
+            color: 0x00cccc,
+            height: 0.001,
+        };
+        const actual = Object.assign({}, defaults, opts);
 
-    buildSliceGeometry(coords, iContour, color, contours, nw, se, radius) {
+        const [w, s, e, n] = wsen; // of bbox
+        // console.log('wsen:', wsen);
+        const offset = proj([(w+e)/2, (s+n)/2]); // lng, lat -> x, y
+        // console.log('offset:', offset);
+
+        const [pw, pn, pe, ps] = [...proj([w, n]), ...proj([e, s])];
+        // console.log('pw, pn, pe, ps:', pw, pn, pe, ps);
+        // const sides = [0.05, 0.05]; // show the mid point
+        const sides = [pe - pw, pn - ps];
+
+        const dzBounds = actual.height;
+        const ls = new THREE.LineSegments(
+            new THREE.EdgesGeometry(new THREE.BoxBufferGeometry(
+                ...sides, dzBounds)),
+            new THREE.LineBasicMaterial({color: actual.color}));
+        ls.position.set(...offset, - dzBounds / 2 + actual.offsetZ);
+        ls.name = `bbox-${window.performance.now()}`;
+        return {
+            obj: ls,
+            offset: [...offset, actual.offsetZ],
+            size: [...sides, actual.height],
+        };
+    }
+    // TODO doc
+    static tileToBbox(tile) {
+        return tilebelt.tileToBBOX(tile);
+    }
+
+    buildSliceGeometry(coords, iContour, color,
+        contours, nw, se, radius) {
         const shadedContour = new THREE.Shape();
         const wireframeContours = [new THREE.Geometry()];
 
         const h = iContour;
-        const unitsPerMeter = ThreeGeo._getUnitsPerMeter(this.constUnitsSide, radius);
+        const unitsPerMeter = ThreeGeo.getUnitsPerMeter(this.constUnitsSide, radius);
         const pz = - contours[h].ele * unitsPerMeter;
 
         // iterate through vertices per shape
         // console.log('coords[0]:', coords[0]);
         coords[0].forEach((coord, index) => {
-            let [px, py] = this._projectCoord(coord, nw, se);
+            let [px, py] = this.projectCoord(coord, nw, se);
             wireframeContours[0].vertices.push(
                 new THREE.Vector3(-px, py, pz));
             if (index === 0) {
@@ -478,7 +322,7 @@ for triInfo     <-                             triWorld,    normalWorld
 
             // iterate through hole path vertices
             for (let j = 0; j < coords[k].length; j++) {
-                let [px, py] = this._projectCoord(coords[k][j], nw, se);
+                let [px, py] = this.projectCoord(coords[k][j], nw, se);
                 wireframeContours[k].vertices.push(
                     new THREE.Vector3(-px, py, pz));
                 if (j === 0) {
@@ -527,8 +371,8 @@ for triInfo     <-                             triWorld,    normalWorld
 
         return [lines, extrudeShade];
     }
-    _getVectorDem(contours, northWest, southEast, radius) {
-        // console.log('_getVectorDem():', contours, northWest, southEast, radius);
+    getVectorDem(contours, northWest, southEast, radius) {
+        // console.log('getVectorDem():', contours, northWest, southEast, radius);
 
         // deprecated to remove the d3 dependency (save ~125KB)
         // const colorRange = d3.scaleLinear()
@@ -663,7 +507,7 @@ for triInfo     <-                             triWorld,    normalWorld
                         cb(null);
                         return;
                     }
-                    // console.log('mapbox -> buffer:', buffer); // ArrayBuffer(39353) {}
+                    // console.log('mapbox -> buffer:', buffer); // ArrayBuffer(39353)Â {}
                     cb(new VectorTile(new Pbf(buffer)));
                 });
             } else {
@@ -674,7 +518,7 @@ for triInfo     <-                             triWorld,    normalWorld
                         return;
                     }
                     this.blobToBuffer(blob, (buffer) => {
-                        // console.log('blob -> buffer:', buffer); // ArrayBuffer(39353) {}
+                        // console.log('blob -> buffer:', buffer); // ArrayBuffer(39353)Â {}
                         try {
                             let pbf = new Pbf(buffer);
                             cb(new VectorTile(pbf));
@@ -820,7 +664,7 @@ for triInfo     <-                             triWorld,    normalWorld
         } else {
             elevations = new Array(262144).fill(0); // 512 * 512 (=1/4 MB)
         }
-        // console.log('elevations:', elevations); // elevations: (262144) [...]
+        // console.log('elevations:', elevations); // elevations: (262144)Â [...]
 
         // figure out tile coordinates of the 16 grandchildren of this tile
         let sixteenths = [];
@@ -849,7 +693,7 @@ for triInfo     <-                             triWorld,    normalWorld
         // 14 [256, 384] [384, 512]
         // 15 [384, 512] [384, 512]
 
-        const unitsPerMeter = ThreeGeo._getUnitsPerMeter(this.constUnitsSide, radius);
+        const unitsPerMeter = ThreeGeo.getUnitsPerMeter(this.constUnitsSide, radius);
         const dataEle = [];
         sixteenths.forEach((zoomposStr, index) => {
             if (! zpCoveredStr.includes(zoomposStr)) return;
@@ -876,7 +720,7 @@ for triInfo     <-                             triWorld,    normalWorld
                     // console.log('lonlatPixel:', lonlatPixel);
                     // NOTE: do use shift = 1 for computeSeamRows()
                     array.push(
-                        ...this._projectCoord(lonlatPixel, bbox.northWest, bbox.southEast),
+                        ...this.projectCoord(lonlatPixel, bbox.northWest, bbox.southEast),
                         elev[dataIndex] * unitsPerMeter);
                     dataIndex++;
                 }
@@ -907,7 +751,7 @@ for triInfo     <-                             triWorld,    normalWorld
             // arr = [0,1,2,3]
             // arr.splice(2, 0, 99)
             // arr
-            // (5) [0, 1, 99, 2, 3]
+            // (5)Â [0, 1, 99, 2, 3]
             array.splice(indexZ-2, 0, arrayNei[indexZNei-2]);
             array.splice(indexZ-1, 0, arrayNei[indexZNei-1]);
             array.splice(indexZ, 0, arrayNei[indexZNei]);
@@ -990,18 +834,6 @@ for triInfo     <-                             triWorld,    normalWorld
         return infoNei;
     }
 
-    static createDataFlipY(data, shape) {
-        const [w, h, size] = shape;
-        const out = new Uint8Array(data.length);
-        for (let y = 0; y < h; y++) {
-            for (let x = 0; x < w * size; x += size) {
-                for (let i = 0; i < size; i++) {
-                    out[(h-1-y) * w * size + x + i] = data[y * w * size + x + i];
-                }
-            }
-        }
-        return out;
-    }
     static resolveTex(zoompos, apiSatellite, token, onTex) {
         this.fetchTile(zoompos, apiSatellite, token, (pixels) => {
             let tex = null;
@@ -1009,26 +841,10 @@ for triInfo     <-                             triWorld,    normalWorld
                 // console.log("satellite pixels", pixels.shape.slice());
                 // console.log('satellite pixels:', pixels);
                 // https://threejs.org/docs/#api/textures/DataTexture
-
-                //========
-                // https://github.com/mrdoob/three.js/blob/f4c54b2064d6e03495d88633488a66067a67ec2e/src/renderers/WebGLRenderer.js#L5850
-                // https://developer.mozilla.org/en-US/docs/Web/API/WebGLRenderingContext/texImage2D
-                // https://github.com/mapbox/mapbox-gl-js/issues/5292
-                // THREE.DataTexture() is based on void gl.texImage2D(target, level, internalformat, width, height, border, format, type, ArrayBufferView? pixels);
-                // On Firefox, calling it with y-flip causes the warning: "Error: WebGL warning: texImage2D: Alpha-premult and y-flip are deprecated for non-DOM-Element uploads."
-                // On Exokit, y-flip is not performed.
-                // So do the workaround below instead.
-                // DEPRECATED ----
-                // tex = new THREE.DataTexture(pixels.data,
-                //     pixels.shape[0], pixels.shape[1], THREE.RGBAFormat);
-                // tex.flipY = true;
-                // tex.needsUpdate = true;
-                //========
-                // workaround: do manual y-flip
-                tex = new THREE.DataTexture(ThreeGeo.createDataFlipY(pixels.data, pixels.shape),
+                tex = new THREE.DataTexture(pixels.data,
                     pixels.shape[0], pixels.shape[1], THREE.RGBAFormat);
+                tex.flipY = true;
                 tex.needsUpdate = true;
-                //========
             } else {
                 console.log(`fetchTile() failed for tex of zp: ${zoompos}`);
             }
@@ -1038,7 +854,7 @@ for triInfo     <-                             triWorld,    normalWorld
         });
     }
 
-    _getRgbDem(dataEle, apiSatellite, _onSatelliteMat) {
+    getRgbDem(resolve, dataEle, apiSatellite, onSatelliteMat) {
         console.log('apiSatellite:', apiSatellite);
 
         // dataEle should be sorted so that ThreeGeo.resolveSeams() is applied
@@ -1102,19 +918,22 @@ for triInfo     <-                             triWorld,    normalWorld
                         map: tex,
                     });
                 }
-                if (_onSatelliteMat) _onSatelliteMat(plane, objs);
+                if (onSatelliteMat) {
+                    onSatelliteMat(plane);
+                }
             });
         });
+        resolve('success')
         return objs;
     }
 
-    _getRgbTiles(zpCovered, bbox, radius, apiRgb, apiSatellite,
-        onRgbDem, onSatelliteMat, watcher) {
+    getRgbTiles(resolve, zpCovered, bbox, radius, apiRgb, apiSatellite,
+        onRgbDem, onSatelliteMat) {
         let zpEle = ThreeGeo.getZoomposEle(zpCovered); // e.g. satellite's zoom: 14
-        console.log('(for rgb dem) zpEle:', zpEle); // e.g. dem's zoom: 12 (=14-2)
+        console.log('zpEle:', zpEle); // e.g. dem's zoom: 12 (=14-2)
 
         let dataEleCovered = [];
-        let count = 0;
+        let count = 0; // TODO use Promise() instead ??
         zpEle.forEach((zoompos) => {
             // console.log('ele zoompos', zoompos);
             ThreeGeo.fetchTile(zoompos, apiRgb, this.tokenMapbox, (pixels) => {
@@ -1128,42 +947,26 @@ for triInfo     <-                             triWorld,    normalWorld
 
                 count++;
                 if (count === zpEle.length) {
-                    console.log('dataEleCovered:', dataEleCovered);
-
-                    if (onSatelliteMat) {
-                        let _count = 0; // for satellite processing
-                        const _onSatelliteMat = (mesh, meshesAcc) => {
-                            _count++;
-                            onSatelliteMat(mesh);
-                            if (_count === dataEleCovered.length) {
-                                watcher({what: 'dem-rgb', data: meshesAcc});
-                            }
-                        };
-                        const meshes = this._getRgbDem(
-                            dataEleCovered, apiSatellite, _onSatelliteMat);
-                        onRgbDem(meshes);
-                    } else {
-                        const meshes = this._getRgbDem(
-                            dataEleCovered, apiSatellite, null);
-                        onRgbDem(meshes);
-                        watcher({what: 'dem-rgb', data: meshes});
+                    // console.log('dataEleCovered:', dataEleCovered);
+                    if (onRgbDem) {
+                        onRgbDem(this.getRgbDem(resolve,
+                            dataEleCovered, apiSatellite, onSatelliteMat));
                     }
                 }
             });
         });
     }
 
-    _getVectorTiles(zpCovered, bbox, radius, apiVector,
-        onVectorDem, watcher) {
+    getVectorTiles(zpCovered, bbox, radius, apiVector, onVectorDem) {
         let zpEle = ThreeGeo.getZoomposEle(zpCovered); // e.g. satellite's zoom: 14
-        console.log('(for vector dem) zpEle:', zpEle); // e.g. dem's zoom: 12 (=14-2)
+        console.log('zpEle:', zpEle); // e.g. dem's zoom: 12 (=14-2)
 
         let bottomTiles = []; // will get reduced
         let geojson = { // will get reduced
             type: "FeatureCollection",
             features: [],
         };
-        let count = 0;
+        let count = 0; // TODO use Promise() instead ??
         zpEle.forEach((zoompos) => {
             ThreeGeo.fetchTile(zoompos, apiVector, this.tokenMapbox, (tile) => {
                 if (tile) {
@@ -1174,12 +977,10 @@ for triInfo     <-                             triWorld,    normalWorld
 
                 count++;
                 if (count === zpEle.length) {
-                    const contours = ThreeGeo.processVectorGeojson(
+                    let contours = ThreeGeo.processVectorGeojson(
                         geojson, bottomTiles, bbox.feature, radius);
-                    const objs = this._getVectorDem(
-                        contours, bbox.northWest, bbox.southEast, radius);
-                    onVectorDem(objs);
-                    watcher({what: 'dem-vec', data: objs});
+                    onVectorDem(this.getVectorDem(
+                        contours, bbox.northWest, bbox.southEast, radius));
                 }
             });
         });
@@ -1222,129 +1023,61 @@ for triInfo     <-                             triWorld,    normalWorld
         };
     }
 
-
-    static debugZp(zpCovered) {
-        console.warn('zpCovered mods enabled for debug...');
-        zpCovered.length = 1;
-        // zpCovered.length = 2;
-        // zpCovered.length = 4;
-        // zpCovered.length = 8;
-        // zpCovered.length = 12;
-        // zpCovered.length = 16;
-
-        // debug with eiger
-        // zpCovered.length = 19; // eiger snow ok
-        // zpCovered.length = 20; // eiger snow NG <- fixed by dataEle.sort()
-        // zpCovered = [[14, 8555, 5792], [14, 8556, 5792]]; // OK
-        // zpCovered = [[14, 8555, 5792], [14, 8556, 5792], [14, 8557, 5792]]; // NG <- fixed by dataEle.sort()
-
-        // zpCovered = [ // for checking seams
-        //     [14, 3073, 6421], [14, 3074, 6421],
-        //     [14, 3073, 6422], [14, 3074, 6422],
-        // ];
-        // zpCovered = [[14, 3072, 6420],]; // debug, to one elem
-        // zpCovered = [                  [14, 3073, 6420],];
-        // zpCovered = [[14, 3072, 6420], [14, 3073, 6420],];
-        // zpCovered = [
-        //     [14, 3072, 6420], [14, 3074, 6420], [14, 3076, 6420],
-        //     [14, 3073, 6421], [14, 3075, 6421],
-        //     [14, 3072, 6422], [14, 3074, 6422], [14, 3076, 6422],
-        //     [14, 3073, 6423], [14, 3075, 6423],
-        // ];
-    }
-
-    static _createWatcher(cbs, res) {
-        let isVecPending = cbs.onVectorDem ? true : false;
-        let isRgbPending = cbs.onRgbDem ? true : false;
-        const ret = {vectorDem: [], rgbDem: []};
-
-        const isDone = () => !isVecPending && !isRgbPending;
-
-        if (isDone()) {
-            res(ret);
-            return null;
-        }
-
-        return payload => {
-            // console.log('payload:', payload);
-            const { what, data } = payload;
-            if (what === 'dem-vec') {
-                isVecPending = false;
-                ret.vectorDem = data;
-            }
-            if (what === 'dem-rgb') {
-                isRgbPending = false;
-                ret.rgbDem = data;
-            }
-            if (isDone()) { // both callbacks are complete
-                res(ret);
-            }
-        };
-    }
-    _getTerrain(zpCovered, bbox, radius, cbs) {
-        return new Promise((res, rej) => {
-            const watcher = ThreeGeo._createWatcher(cbs, res);
-            if (!watcher) return;
-
-            try {
-                if (cbs.onVectorDem) {
-                    this._getVectorTiles(zpCovered, bbox, radius,
-                        this.apiVector, cbs.onVectorDem, watcher);
-                }
-                if (cbs.onRgbDem) {
-                    this._getRgbTiles(zpCovered, bbox, radius,
-                        this.apiRgb, this.apiSatellite,
-                        cbs.onRgbDem, cbs.onSatelliteMat, watcher);
-                }
-            } catch (err) {
-                console.error('err:', err);
-                rej(null);
-            }
-        });
-    }
-
-    // tiles to cover a 5km-radius:  - processing (approx.)
+    // tiles to cover a 5km-radius:  - processing
     // zoom: 15, // 64  <= 8x8 tiles - 8s
     // zoom: 14, // 20  <= 5x5 tiles - 4s (high resolution)
     // zoom: 13, // 6-9 <= 3x3 tiles - 2s (default)
     // zoom: 12, // 2-4 <= 2x2 tiles - 1s
     // zoom: 11, // 1 tile           - 0s
-    getTerrain(origin, radius, zoom, cbs={}) {
-        return new Promise(async (res, rej) => {
-            try {
-                const bbox = ThreeGeo.getBbox(origin, radius);
-                console.log('bbox:', bbox);
+    getTerrain(resolve, origin, radius, zoom, callbacks={}) {
+        let bbox = ThreeGeo.getBbox(origin, radius);
+        console.log('bbox:', bbox);
 
-                const zpCovered = ThreeGeo.getZoomposCovered(bbox.feature, zoom);
-                // ThreeGeo.debugZp(zpCovered); // dev only
-                console.log('(for satellite) zpCovered:', zpCovered);
+        let zpCovered = ThreeGeo.getZoomposCovered(bbox.feature, zoom);
+        console.log('zpCovered:', zpCovered);
+        if (0) { //!!!!!!!! for debug
+            console.log('zpCovered mods enabled for debug!!!!');
+            // zpCovered.length = 1;
+            // zpCovered.length = 2;
+            zpCovered.length = 4;
+            // zpCovered.length = 8;
+            // zpCovered.length = 12;
+            // zpCovered.length = 16;
 
-                res(await this._getTerrain(zpCovered, bbox, radius, cbs));
-            } catch (err) {
-                console.error('err:', err);
-                rej(null);
-            }
-        });
-    }
-    async getTerrainRgb(origin, radius, zoom, cb=undefined) {
-        const _cbs = {onRgbDem: () => {}, onSatelliteMat: () => {}}; // to trigger rgb fetching
-        const { rgbDem } = await this.getTerrain(origin, radius, zoom, _cbs);
-        if (cb) cb(rgbDem);
-        return rgbDem;
-    }
-    async getTerrainVector(origin, radius, zoom, cb=undefined) {
-        const _cbs = {onVectorDem: () => {}}; // to trigger vector fetching
-        const { vectorDem } = await this.getTerrain(origin, radius, zoom, _cbs);
-        if (cb) cb(vectorDem);
-        return vectorDem;
-    }
+            // debug with eiger
+            // zpCovered.length = 19; // eiger snow ok
+            // zpCovered.length = 20; // eiger snow NG <- fixed by dataEle.sort()
+            // zpCovered = [[14, 8555, 5792], [14, 8556, 5792]]; // OK
+            // zpCovered = [[14, 8555, 5792], [14, 8556, 5792], [14, 8557, 5792]]; // NG <- fixed by dataEle.sort()
 
+            // zpCovered = [ // for checking seams
+            //     [14, 3073, 6421], [14, 3074, 6421],
+            //     [14, 3073, 6422], [14, 3074, 6422],
+            // ];
+            // zpCovered = [[14, 3072, 6420],]; // debug, to one elem
+            // zpCovered = [                  [14, 3073, 6420],];
+            // zpCovered = [[14, 3072, 6420], [14, 3073, 6420],];
+            // zpCovered = [
+            //     [14, 3072, 6420], [14, 3074, 6420], [14, 3076, 6420],
+            //     [14, 3073, 6421], [14, 3075, 6421],
+            //     [14, 3072, 6422], [14, 3074, 6422], [14, 3076, 6422],
+            //     [14, 3073, 6423], [14, 3075, 6423],
+            // ];
+        }
+
+        if (callbacks.onVectorDem) {
+            this.getVectorTiles(zpCovered, bbox, radius,
+                this.apiVector, callbacks.onVectorDem);
+        }
+        if (callbacks.onRgbDem) {
+            this.getRgbTiles(resolve, zpCovered, bbox, radius,
+                this.apiRgb, this.apiSatellite,
+                callbacks.onRgbDem, callbacks.onSatelliteMat);
+        }
+    }
     setApiVector(api) { this.apiVector = api; }
     setApiRgb(api) { this.apiRgb = api; }
     setApiSatellite(api) { this.apiSatellite = api; }
 }
-
-ThreeGeo.Utils = Utils;
-ThreeGeo.Laser = Laser;
 
 export default ThreeGeo;
