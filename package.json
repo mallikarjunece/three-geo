@@ -7,6 +7,7 @@
         "example": "examples",
         "test": "test"
     },
+    "publishConfig": { "registry": "https://npm.pkg.github.com/" },
     "scripts": {
         "dist": "npm run build && npm run build:esm && rm -rf ./dist && cp -r ./lib ./dist",
         "build": "webpack --mode development --env dev && webpack --mode production --env build && npm run test",
